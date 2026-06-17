@@ -33,6 +33,7 @@ def main() -> None:
     print("Bundle loaded.")
     node_table = bundle["node_table"]
     optimized_adj = bundle["optimized_adj"]
+    edge_supervised_adj = bundle.get("edge_supervised_adj")
 
     if args.abc_edges:
         print(f"Rebuilding initial adjacency from ABC edges: {args.abc_edges}")
@@ -68,6 +69,12 @@ def main() -> None:
     print("Evaluating optimized graph ...")
     opt_metrics = evaluate_with_hic(optimized_adj, node_table, filtered_hic_df, topk=args.topk)
     rank_metrics = compare_topk_edges(init_adj, optimized_adj, topk=args.topk)
+    edge_metrics = None
+    edge_rank_metrics = None
+    if edge_supervised_adj is not None:
+        print("Evaluating edge-supervised graph ...")
+        edge_metrics = evaluate_with_hic(edge_supervised_adj, node_table, filtered_hic_df, topk=args.topk)
+        edge_rank_metrics = compare_topk_edges(init_adj, edge_supervised_adj, topk=args.topk)
 
     print("Initial graph metrics:")
     print(
@@ -82,6 +89,14 @@ def main() -> None:
         f"hit_rate={opt_metrics['hit_rate']:.6f}"
     )
     print(f"Delta hit_rate={opt_metrics['hit_rate'] - init_metrics['hit_rate']:.6f}")
+    if edge_metrics is not None:
+        print("Edge-supervised graph metrics:")
+        print(
+            f"topk={int(edge_metrics['topk'])} "
+            f"hit_count={int(edge_metrics['hit_count'])} "
+            f"hit_rate={edge_metrics['hit_rate']:.6f}"
+        )
+        print(f"Edge-supervised delta hit_rate={edge_metrics['hit_rate'] - init_metrics['hit_rate']:.6f}")
     print("Initial vs optimized ranking diagnostics:")
     print(
         f"topk_overlap={rank_metrics['topk_overlap']:.6f} "
@@ -89,6 +104,14 @@ def main() -> None:
         f"init_topk_size={int(rank_metrics['init_topk_size'])} "
         f"opt_topk_size={int(rank_metrics['opt_topk_size'])}"
     )
+    if edge_rank_metrics is not None:
+        print("Initial vs edge-supervised ranking diagnostics:")
+        print(
+            f"topk_overlap={edge_rank_metrics['topk_overlap']:.6f} "
+            f"topk_jaccard={edge_rank_metrics['topk_jaccard']:.6f} "
+            f"init_topk_size={int(edge_rank_metrics['init_topk_size'])} "
+            f"edge_topk_size={int(edge_rank_metrics['opt_topk_size'])}"
+        )
 
 
 if __name__ == "__main__":

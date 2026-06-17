@@ -19,6 +19,32 @@ class PeakIDGLOutput:
     node_pred: Tensor
     node_emb: Tensor
     learned_adj_logits: Tensor
+    edge_logits: Optional[Tensor] = None
+
+
+class EdgePredictionHead(nn.Module):
+    def __init__(self, hidden_dim: int, edge_feature_dim: int = 0, dropout: float = 0.2):
+        super().__init__()
+        in_dim = hidden_dim * 4 + edge_feature_dim
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+    def forward(self, node_emb: Tensor, edge_index: Tensor, edge_attr: Optional[Tensor] = None) -> Tensor:
+        src = node_emb[edge_index[0]]
+        dst = node_emb[edge_index[1]]
+        pair_features = [src, dst, torch.abs(src - dst), src * dst]
+        if edge_attr is not None:
+            if edge_attr.dim() == 1:
+                edge_attr = edge_attr.unsqueeze(-1)
+            pair_features.append(edge_attr.float())
+        return self.net(torch.cat(pair_features, dim=-1)).squeeze(-1)
 
 
 class PeakLevelIDGLPyG(nn.Module):
@@ -32,6 +58,7 @@ class PeakLevelIDGLPyG(nn.Module):
         add_self_loops: bool = True,
         topk_edges: int = 20,
         graph_iters: int = 1,
+        edge_feature_dim: int = 0,
         return_dense_adj: bool = True,
     ):
         super().__init__()
@@ -48,6 +75,7 @@ class PeakLevelIDGLPyG(nn.Module):
         self.convs = nn.ModuleList([GCNConv(hidden_dim, hidden_dim, add_self_loops=False, normalize=False) for _ in range(num_layers)])
         self.norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(num_layers)])
         self.reg_head = NodeRegressionHead(hidden_dim, dropout)
+        self.edge_head = EdgePredictionHead(hidden_dim, edge_feature_dim=edge_feature_dim, dropout=dropout)
 
     def _prepare_adj(self, adj: Union[Tensor, np.ndarray]) -> Tensor:
         return _as_dense_adj(adj)
@@ -64,10 +92,14 @@ class PeakLevelIDGLPyG(nn.Module):
         adj: Union[Tensor, np.ndarray],
         node_features: Tensor,
         node_labels: Optional[Tensor] = None,
-    ) -> Tuple[Tensor, Tensor]:
+        edge_index: Optional[Tensor] = None,
+        edge_attr: Optional[Tensor] = None,
+        return_output: bool = False,
+    ) -> Union[Tuple[Tensor, Tensor], PeakIDGLOutput]:
         adj = self._prepare_adj(adj).to(node_features.device)
         h = self.encoder(node_features.float())
         optimized_adj = adj
+        learned_logits = adj
 
         num_iters = max(1, self.graph_iters)
         for _ in range(num_iters):
@@ -76,10 +108,25 @@ class PeakLevelIDGLPyG(nn.Module):
             h = self._message_pass(h, optimized_adj)
 
         node_pred = self.reg_head(h)
+        edge_logits = None
+        if edge_index is not None:
+            edge_logits = self.score_edges(h, edge_index.to(h.device), edge_attr=edge_attr)
         if not self.return_dense_adj:
             optimized_adj = optimized_adj.to_sparse()
+        if return_output:
+            return PeakIDGLOutput(
+                optimized_adj=optimized_adj,
+                node_pred=node_pred,
+                node_emb=h,
+                learned_adj_logits=learned_logits,
+                edge_logits=edge_logits,
+            )
         return optimized_adj, node_pred
 
+    def score_edges(self, node_emb: Tensor, edge_index: Tensor, edge_attr: Optional[Tensor] = None) -> Tensor:
+        if edge_attr is not None:
+            edge_attr = edge_attr.to(node_emb.device)
+        return self.edge_head(node_emb, edge_index.to(node_emb.device), edge_attr=edge_attr)
 
 
 
