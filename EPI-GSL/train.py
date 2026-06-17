@@ -31,6 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-distance", type=int, default=200000)
     parser.add_argument("--abc-edges", type=str, default="", help="Optional ABC edge table TSV.")
     parser.add_argument("--abc-score-col", type=str, default="abc_score")
+    parser.add_argument("--label-col", type=str, default="atac_signal_sum")
+    parser.add_argument("--normalize-features-by-length", action="store_true")
     parser.add_argument("--chrom", type=str, default="")
     parser.add_argument("--ep-only", action="store_true")
     parser.add_argument("--hidden-dim", type=int, default=128)
@@ -67,6 +69,18 @@ def main() -> None:
     node_table, node_features, node_labels, feature_cols = load_peak_node_tables(
         args.promoter_path,
         args.re_path,
+        label_col=args.label_col,
+        normalize_features_by_length=args.normalize_features_by_length,
+    )
+
+    print(
+        f"Loaded nodes={len(node_table)} features={len(feature_cols)} "
+        f"label_col={args.label_col} normalize_features_by_length={args.normalize_features_by_length}"
+    )
+    print(
+        "Label stats before filtering/sample: "
+        f"mean={node_labels.float().mean().item():.4f} "
+        f"std={node_labels.float().std(unbiased=False).item():.4f}"
     )
 
     if args.chrom:
@@ -81,6 +95,12 @@ def main() -> None:
         node_table = node_table.iloc[sample_idx].reset_index(drop=True)
         node_features = node_features[sample_idx]
         node_labels = node_labels[sample_idx]
+
+    print(
+        f"Training nodes={len(node_table)} feature_dim={node_features.shape[1]} "
+        f"label_mean={node_labels.float().mean().item():.4f} "
+        f"label_std={node_labels.float().std(unbiased=False).item():.4f}"
+    )
 
 
     if args.abc_edges:
@@ -105,6 +125,10 @@ def main() -> None:
             normalize=True,
         )
         adj_source = "distance"
+
+    print(f"Initial adj shape={tuple(adj.shape)} nonzero={int((adj > 0).sum().item())}")
+
+
 
     device = torch.device(args.device)
     node_features = node_features.to(device)
@@ -180,3 +204,9 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+

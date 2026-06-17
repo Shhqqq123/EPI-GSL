@@ -20,6 +20,10 @@ DEFAULT_META_COLS = [
     "atac_signal_sum",
     "atac_signal_max",
     "atac_max_overlap",
+    "peak_length",
+    "length_kb",
+    "atac_signal_per_kb",
+    "log1p_atac_signal_per_kb",
 ]
 
 
@@ -67,12 +71,28 @@ def _align_feature_columns(
     return promoter_df, re_df, feature_cols
 
 
+def _add_length_normalized_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    starts = pd.to_numeric(df["start"], errors="coerce").fillna(0.0)
+    ends = pd.to_numeric(df["end"], errors="coerce").fillna(0.0)
+    peak_length = (ends - starts).clip(lower=1.0)
+    length_kb = peak_length / 1000.0
+    atac_signal = pd.to_numeric(df.get("atac_signal_sum", 0.0), errors="coerce").fillna(0.0).clip(lower=0.0)
+
+    df["peak_length"] = peak_length.astype(np.float32)
+    df["length_kb"] = length_kb.astype(np.float32)
+    df["atac_signal_per_kb"] = (atac_signal / length_kb).astype(np.float32)
+    df["log1p_atac_signal_per_kb"] = np.log1p(df["atac_signal_per_kb"].to_numpy(dtype=np.float64)).astype(np.float32)
+    return df
+
+
 def load_peak_node_tables(
     promoter_path: str,
     re_path: str,
     feature_cols: Optional[Sequence[str]] = None,
     label_col: str = "atac_signal_sum",
     zscore_labels: bool = True,
+    normalize_features_by_length: bool = False,
 ) -> Tuple[pd.DataFrame, Tensor, Tensor, List[str]]:
     promoter_df = pd.read_csv(promoter_path, sep="\t").copy()
     re_df = pd.read_csv(re_path, sep="\t").copy()
@@ -80,6 +100,8 @@ def load_peak_node_tables(
     promoter_df["node_source"] = "promoter"
     re_df["node_source"] = "re"
 
+    promoter_df = _add_length_normalized_columns(promoter_df)
+    re_df = _add_length_normalized_columns(re_df)
 
     promoter_df, re_df, inferred_features = _align_feature_columns(promoter_df, re_df)
     if feature_cols is None:
@@ -104,6 +126,9 @@ def load_peak_node_tables(
         labels = _safe_zscore(labels)
 
     features = node_table[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+    if normalize_features_by_length:
+        length_kb = pd.to_numeric(node_table["length_kb"], errors="coerce").fillna(1.0).clip(lower=1e-6).to_numpy(dtype=np.float32)
+        features = features / length_kb[:, None]
     return node_table, torch.from_numpy(features), torch.from_numpy(labels), list(feature_cols)
 
 

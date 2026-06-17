@@ -51,6 +51,28 @@ python EPI-GSL\train.py `
   --ep-only
 ```
 
+Length-normalized variant for reducing promoter/cCRE length bias:
+
+```powershell
+python EPI-GSL\train.py `
+  --promoter-path promoter_nodes_full.tsv `
+  --re-path re_nodes_full.tsv `
+  --output-dir outputs\epi_gsl_abc_chr1_iter3_len_norm `
+  --abc-edges work\abc_edges_chr1.tsv `
+  --chrom chr1 `
+  --sample-size 5000 `
+  --label-col log1p_atac_signal_per_kb `
+  --normalize-features-by-length `
+  --epochs 300 `
+  --lr 0.0005 `
+  --graph-alpha 0.5 `
+  --topk-edges 50 `
+  --graph-iters 3 `
+  --stability-weight 0.001 `
+  --smooth-weight 0.01 `
+  --ep-only
+```
+
 Evaluate against Hi-C loops using the same ABC initial graph:
 
 ```powershell
