@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--abc-edges", type=str, default="", help="Optional ABC edge table TSV used to rebuild initial adjacency.")
     parser.add_argument("--abc-score-col", type=str, default="abc_score")
     parser.add_argument("--topk", type=int, default=1000)
+    parser.add_argument("--hic-split-name", type=str, default="all", help="Label printed for the Hi-C BEDPE split being evaluated.")
     parser.add_argument("--ep-only", action="store_true")
     return parser.parse_args()
 
@@ -57,7 +58,7 @@ def main() -> None:
         )
     print("Initial adjacency rebuilt.")
 
-    print(f"Loading Hi-C bedpe: {args.hic_bedpe}")
+    print(f"Loading Hi-C bedpe ({args.hic_split_name}): {args.hic_bedpe}")
     hic_df = load_hic_bedpe(args.hic_bedpe)
     filtered_hic_df = filter_bedpe_to_node_chroms(hic_df, node_table)
     node_chroms = ",".join(sorted(node_table["chr"].astype(str).unique()))

@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--topk-edges", type=int, default=20)
     parser.add_argument("--graph-iters", type=int, default=1, help="Number of iterative graph learning/message passing rounds.")
     parser.add_argument("--edge-labels", type=str, default="", help="Optional edge label TSV from make_edge_labels.py.")
+    parser.add_argument("--edge-label-col", type=str, default="edge_label", help="Column in --edge-labels used as training target.")
     parser.add_argument("--edge-loss-weight", type=float, default=0.0, help="Weight for supervised edge BCE loss.")
     parser.add_argument("--edge-feature-cols", type=str, default="abc_score,distance")
     parser.add_argument("--max-edge-train-samples", type=int, default=0, help="Optional cap for supervised edge samples.")
@@ -96,12 +97,13 @@ def load_edge_supervision(
     edge_label_path: str,
     node_table: pd.DataFrame,
     edge_feature_cols: List[str],
+    edge_label_col: str,
     negative_ratio: float,
     max_train_samples: int,
     seed: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
     edge_df = pd.read_csv(edge_label_path, sep="\t").copy()
-    required = ["re_node_id", "promoter_node_id", "edge_label"]
+    required = ["re_node_id", "promoter_node_id", edge_label_col]
     missing = [col for col in required if col not in edge_df.columns]
     if missing:
         raise KeyError(f"Edge label table is missing required columns: {missing}")
@@ -113,7 +115,7 @@ def load_edge_supervision(
     edge_df = edge_df.loc[keep].reset_index(drop=True)
     src = src_idx.loc[keep].astype(int).to_numpy(dtype=np.int64)
     dst = dst_idx.loc[keep].astype(int).to_numpy(dtype=np.int64)
-    labels = pd.to_numeric(edge_df["edge_label"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+    labels = pd.to_numeric(edge_df[edge_label_col], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
 
     if len(labels) == 0:
         empty_index = torch.empty((2, 0), dtype=torch.long)
@@ -213,6 +215,7 @@ def main() -> None:
             edge_label_path=args.edge_labels,
             node_table=node_table,
             edge_feature_cols=edge_feature_cols,
+            edge_label_col=args.edge_label_col,
             negative_ratio=args.negative_ratio,
             max_train_samples=args.max_edge_train_samples,
             seed=args.seed,
@@ -229,7 +232,7 @@ def main() -> None:
         edge_feature_dim = all_edge_attr.shape[1]
         print(
             f"Supervised edges total={all_edge_index.shape[1]} train={train_edge_index.shape[1]} "
-            f"train_pos={train_edge_labels_pos} edge_feature_dim={edge_feature_dim}"
+            f"train_pos={train_edge_labels_pos} label_col={args.edge_label_col} edge_feature_dim={edge_feature_dim}"
         )
         if all_edge_index.shape[1] == 0:
             edge_supervision = None
@@ -371,6 +374,7 @@ def main() -> None:
             "abc_edges": args.abc_edges,
             "abc_score_col": args.abc_score_col,
             "edge_labels": args.edge_labels,
+            "edge_label_col": args.edge_label_col,
             "edge_feature_cols": edge_feature_cols,
         },
         output_dir / "ep_idgl_outputs.pt",
@@ -387,7 +391,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
 
 
