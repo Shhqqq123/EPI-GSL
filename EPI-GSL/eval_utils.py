@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Set, Tuple
+from typing import Dict, Iterable, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -120,3 +120,120 @@ def compare_topk_edges(init_adj: Tensor, optimized_adj: Tensor, topk: int = 1000
         "init_topk_size": float(len(init_edges)),
         "opt_topk_size": float(len(opt_edges)),
     }
+
+
+def load_edge_label_table(
+    edge_label_path: str,
+    node_table: pd.DataFrame,
+    label_col: str,
+    re_col: str = "re_node_id",
+    promoter_col: str = "promoter_node_id",
+) -> pd.DataFrame:
+    edge_df = pd.read_csv(edge_label_path, sep="\t").copy()
+    required = [re_col, promoter_col, label_col]
+    missing = [col for col in required if col not in edge_df.columns]
+    if missing:
+        raise KeyError(f"Edge label table is missing required columns: {missing}")
+    if "node_id" not in node_table.columns:
+        raise KeyError("node_table must contain a node_id column")
+
+    node_to_idx = {str(node_id): idx for idx, node_id in enumerate(node_table["node_id"].astype(str))}
+    src_idx = edge_df[re_col].astype(str).map(node_to_idx)
+    dst_idx = edge_df[promoter_col].astype(str).map(node_to_idx)
+    keep = src_idx.notna() & dst_idx.notna()
+
+    labels = pd.to_numeric(edge_df.loc[keep, label_col], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+    table = pd.DataFrame(
+        {
+            "i": src_idx.loc[keep].astype(int).to_numpy(dtype=np.int64),
+            "j": dst_idx.loc[keep].astype(int).to_numpy(dtype=np.int64),
+            "label": (labels > 0.5).astype(np.int8),
+        }
+    )
+    return table.reset_index(drop=True)
+
+
+def _average_ranks(values: np.ndarray) -> np.ndarray:
+    order = np.argsort(values, kind="mergesort")
+    ranks = np.empty(len(values), dtype=np.float64)
+    sorted_values = values[order]
+    start = 0
+    while start < len(values):
+        end = start + 1
+        while end < len(values) and sorted_values[end] == sorted_values[start]:
+            end += 1
+        avg_rank = 0.5 * (start + 1 + end)
+        ranks[order[start:end]] = avg_rank
+        start = end
+    return ranks
+
+
+def _roc_auc(labels: np.ndarray, scores: np.ndarray) -> float:
+    labels = labels.astype(bool)
+    n_pos = int(labels.sum())
+    n_neg = int((~labels).sum())
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    ranks = _average_ranks(scores)
+    pos_rank_sum = float(ranks[labels].sum())
+    return (pos_rank_sum - n_pos * (n_pos + 1) / 2.0) / float(n_pos * n_neg)
+
+
+def _average_precision(labels: np.ndarray, scores: np.ndarray) -> float:
+    labels = labels.astype(np.int8)
+    n_pos = int(labels.sum())
+    if n_pos == 0:
+        return float("nan")
+    order = np.argsort(scores, kind="mergesort")[::-1]
+    sorted_labels = labels[order]
+    tp = np.cumsum(sorted_labels)
+    precision = tp / (np.arange(len(sorted_labels), dtype=np.float64) + 1.0)
+    return float(precision[sorted_labels == 1].sum() / n_pos)
+
+
+def evaluate_edge_label_ranking(
+    predicted_adj: Tensor,
+    edge_label_table: pd.DataFrame,
+    topks: Iterable[int] = (500, 1000, 2000),
+) -> Dict[str, float]:
+    if predicted_adj.is_sparse:
+        predicted_adj = predicted_adj.to_dense()
+    dense_scores = predicted_adj.detach().cpu().numpy()
+    i = edge_label_table["i"].to_numpy(dtype=np.int64)
+    j = edge_label_table["j"].to_numpy(dtype=np.int64)
+    labels = edge_label_table["label"].to_numpy(dtype=np.int8)
+    scores = dense_scores[i, j].astype(np.float64)
+
+    valid = np.isfinite(scores)
+    scores = scores[valid]
+    labels = labels[valid]
+    n_edges = int(len(labels))
+    n_pos = int(labels.sum())
+    prevalence = float(n_pos) / float(n_edges) if n_edges > 0 else 0.0
+
+    metrics: Dict[str, float] = {
+        "num_edges": float(n_edges),
+        "positive_edges": float(n_pos),
+        "prevalence": prevalence,
+        "auroc": _roc_auc(labels, scores) if n_edges > 0 else float("nan"),
+        "auprc": _average_precision(labels, scores) if n_edges > 0 else float("nan"),
+    }
+    if n_edges == 0:
+        return metrics
+
+    order = np.argsort(scores, kind="mergesort")[::-1]
+    sorted_labels = labels[order]
+    for requested_k in topks:
+        k = int(requested_k)
+        if k <= 0:
+            continue
+        actual_k = min(k, n_edges)
+        hits = int(sorted_labels[:actual_k].sum())
+        precision = float(hits) / float(actual_k) if actual_k > 0 else 0.0
+        recall = float(hits) / float(n_pos) if n_pos > 0 else 0.0
+        enrichment = precision / prevalence if prevalence > 0 else float("nan")
+        metrics[f"hit_count_at_{k}"] = float(hits)
+        metrics[f"precision_at_{k}"] = precision
+        metrics[f"recall_at_{k}"] = recall
+        metrics[f"enrichment_at_{k}"] = enrichment
+    return metrics

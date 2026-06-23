@@ -11,7 +11,13 @@ if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
 from data_utils import build_candidate_adj_from_abc_edges, build_candidate_adj_from_distance, load_abc_edges, load_hic_bedpe
-from eval_utils import compare_topk_edges, evaluate_with_hic, filter_bedpe_to_node_chroms
+from eval_utils import (
+    compare_topk_edges,
+    evaluate_edge_label_ranking,
+    evaluate_with_hic,
+    filter_bedpe_to_node_chroms,
+    load_edge_label_table,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,9 +28,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--abc-edges", type=str, default="", help="Optional ABC edge table TSV used to rebuild initial adjacency.")
     parser.add_argument("--abc-score-col", type=str, default="abc_score")
     parser.add_argument("--topk", type=int, default=1000)
+    parser.add_argument("--edge-labels", type=str, default="", help="Optional edge label TSV used for AUROC/AUPRC ranking metrics.")
+    parser.add_argument("--edge-label-col", type=str, default="edge_label_test", help="Column in --edge-labels used for ranking evaluation.")
+    parser.add_argument("--edge-metric-topks", type=str, default="500,1000,2000", help="Comma-separated K values for precision/recall at K.")
     parser.add_argument("--hic-split-name", type=str, default="all", help="Label printed for the Hi-C BEDPE split being evaluated.")
     parser.add_argument("--ep-only", action="store_true")
     return parser.parse_args()
+
+
+def _parse_topks(raw: str) -> list[int]:
+    return [int(item.strip()) for item in raw.split(",") if item.strip()]
+
+
+def _print_edge_label_metrics(name: str, metrics: dict[str, float], topks: list[int]) -> None:
+    print(f"{name} edge-label ranking metrics:")
+    print(
+        f"edges={int(metrics['num_edges'])} "
+        f"positives={int(metrics['positive_edges'])} "
+        f"prevalence={metrics['prevalence']:.6f} "
+        f"auroc={metrics['auroc']:.6f} "
+        f"auprc={metrics['auprc']:.6f}"
+    )
+    for k in topks:
+        hit_key = f"hit_count_at_{k}"
+        precision_key = f"precision_at_{k}"
+        recall_key = f"recall_at_{k}"
+        enrichment_key = f"enrichment_at_{k}"
+        if hit_key not in metrics:
+            continue
+        print(
+            f"  @{k}: "
+            f"hit_count={int(metrics[hit_key])} "
+            f"precision={metrics[precision_key]:.6f} "
+            f"recall={metrics[recall_key]:.6f} "
+            f"enrichment={metrics[enrichment_key]:.3f}"
+        )
 
 
 def main() -> None:
@@ -113,6 +151,19 @@ def main() -> None:
             f"init_topk_size={int(edge_rank_metrics['init_topk_size'])} "
             f"edge_topk_size={int(edge_rank_metrics['opt_topk_size'])}"
         )
+
+    if args.edge_labels:
+        topks = _parse_topks(args.edge_metric_topks)
+        print(f"Loading edge labels for ranking metrics: {args.edge_labels}")
+        edge_label_table = load_edge_label_table(args.edge_labels, node_table, label_col=args.edge_label_col)
+        print(f"Edge label column: {args.edge_label_col}")
+        init_edge_label_metrics = evaluate_edge_label_ranking(init_adj, edge_label_table, topks=topks)
+        opt_edge_label_metrics = evaluate_edge_label_ranking(optimized_adj, edge_label_table, topks=topks)
+        _print_edge_label_metrics("Initial graph", init_edge_label_metrics, topks)
+        _print_edge_label_metrics("Optimized graph", opt_edge_label_metrics, topks)
+        if edge_supervised_adj is not None:
+            edge_sup_label_metrics = evaluate_edge_label_ranking(edge_supervised_adj, edge_label_table, topks=topks)
+            _print_edge_label_metrics("Edge-supervised graph", edge_sup_label_metrics, topks)
 
 
 if __name__ == "__main__":
