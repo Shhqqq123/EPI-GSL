@@ -45,8 +45,14 @@ function Invoke-Step {
     if ($DryRun) {
         return
     }
-    $output = & $PythonExe @CommandArgs 2>&1
-    $exitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & $PythonExe @CommandArgs 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     $output | Tee-Object -FilePath $LogPath | Out-Host
     if ($exitCode -ne 0) {
         throw "$Name failed with exit code $exitCode"
