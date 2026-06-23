@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -32,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--edge-label-col", type=str, default="edge_label_test", help="Column in --edge-labels used for ranking evaluation.")
     parser.add_argument("--edge-metric-topks", type=str, default="500,1000,2000", help="Comma-separated K values for precision/recall at K.")
     parser.add_argument("--hic-split-name", type=str, default="all", help="Label printed for the Hi-C BEDPE split being evaluated.")
+    parser.add_argument("--metrics-output", type=str, default="", help="Optional JSON path for saving all evaluation metrics.")
     parser.add_argument("--ep-only", action="store_true")
     return parser.parse_args()
 
@@ -110,6 +112,9 @@ def main() -> None:
     rank_metrics = compare_topk_edges(init_adj, optimized_adj, topk=args.topk)
     edge_metrics = None
     edge_rank_metrics = None
+    init_edge_label_metrics = None
+    opt_edge_label_metrics = None
+    edge_sup_label_metrics = None
     if edge_supervised_adj is not None:
         print("Evaluating edge-supervised graph ...")
         edge_metrics = evaluate_with_hic(edge_supervised_adj, node_table, filtered_hic_df, topk=args.topk)
@@ -164,6 +169,40 @@ def main() -> None:
         if edge_supervised_adj is not None:
             edge_sup_label_metrics = evaluate_edge_label_ranking(edge_supervised_adj, edge_label_table, topks=topks)
             _print_edge_label_metrics("Edge-supervised graph", edge_sup_label_metrics, topks)
+
+    if args.metrics_output:
+        result = {
+            "outputs_path": args.outputs_path,
+            "abc_edges": args.abc_edges,
+            "hic_bedpe": args.hic_bedpe,
+            "hic_split_name": args.hic_split_name,
+            "edge_labels": args.edge_labels,
+            "edge_label_col": args.edge_label_col,
+            "topk": args.topk,
+            "edge_metric_topks": _parse_topks(args.edge_metric_topks),
+            "node_chromosomes": sorted(node_table["chr"].astype(str).unique().tolist()),
+            "hic_loops_before_chrom_filter": int(len(hic_df)),
+            "hic_loops_after_chrom_filter": int(len(filtered_hic_df)),
+            "hic_overlap_metrics": {
+                "initial": init_metrics,
+                "optimized": opt_metrics,
+                "edge_supervised": edge_metrics,
+            },
+            "ranking_diagnostics": {
+                "initial_vs_optimized": rank_metrics,
+                "initial_vs_edge_supervised": edge_rank_metrics,
+            },
+            "edge_label_ranking_metrics": {
+                "initial": init_edge_label_metrics,
+                "optimized": opt_edge_label_metrics,
+                "edge_supervised": edge_sup_label_metrics,
+            },
+        }
+        output_path = Path(args.metrics_output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+        print(f"Saved metrics JSON to {output_path}")
 
 
 if __name__ == "__main__":
