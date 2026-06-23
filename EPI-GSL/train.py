@@ -37,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label-col", type=str, default="atac_signal_sum")
     parser.add_argument("--normalize-features-by-length", action="store_true")
     parser.add_argument("--chrom", type=str, default="")
+    parser.add_argument("--exclude-chroms", type=str, default="", help="Comma-separated chromosomes excluded from training, for example chr5,chrX,chrY.")
     parser.add_argument("--ep-only", action="store_true")
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=2)
@@ -84,13 +85,18 @@ def _edge_feature_frame(edge_df: pd.DataFrame, feature_cols: List[str]) -> pd.Da
     return pd.DataFrame(features)
 
 
-def _standardize_edge_features(values: np.ndarray) -> np.ndarray:
+def _parse_chrom_list(raw: str) -> List[str]:
+    return [chrom.strip() for chrom in raw.split(",") if chrom.strip()]
+
+
+def _standardize_edge_features(values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if values.size == 0:
-        return values.astype(np.float32)
+        width = values.shape[1] if values.ndim == 2 else 0
+        return values.astype(np.float32), np.zeros(width, dtype=np.float32), np.ones(width, dtype=np.float32)
     mean = values.mean(axis=0, keepdims=True)
     std = values.std(axis=0, keepdims=True)
     std = np.where(std <= 1e-6, 1.0, std)
-    return ((values - mean) / std).astype(np.float32)
+    return ((values - mean) / std).astype(np.float32), mean.squeeze(0).astype(np.float32), std.squeeze(0).astype(np.float32)
 
 
 def load_edge_supervision(
@@ -101,7 +107,7 @@ def load_edge_supervision(
     negative_ratio: float,
     max_train_samples: int,
     seed: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, np.ndarray, np.ndarray]:
     edge_df = pd.read_csv(edge_label_path, sep="\t").copy()
     required = ["re_node_id", "promoter_node_id", edge_label_col]
     missing = [col for col in required if col not in edge_df.columns]
@@ -121,10 +127,12 @@ def load_edge_supervision(
         empty_index = torch.empty((2, 0), dtype=torch.long)
         empty_float = torch.empty((0,), dtype=torch.float32)
         empty_attr = torch.empty((0, len(edge_feature_cols)), dtype=torch.float32)
-        return empty_index, empty_attr, empty_float, empty_index, empty_attr, empty_float, 0
+        empty_mean = np.zeros(len(edge_feature_cols), dtype=np.float32)
+        empty_std = np.ones(len(edge_feature_cols), dtype=np.float32)
+        return empty_index, empty_attr, empty_float, empty_index, empty_attr, empty_float, 0, empty_mean, empty_std
 
     edge_features = _edge_feature_frame(edge_df, edge_feature_cols).to_numpy(dtype=np.float32)
-    edge_features = _standardize_edge_features(edge_features)
+    edge_features, edge_feature_mean, edge_feature_std = _standardize_edge_features(edge_features)
 
     rng = np.random.default_rng(seed)
     pos_idx = np.flatnonzero(labels > 0.5)
@@ -146,7 +154,17 @@ def load_edge_supervision(
     train_edge_attr = all_edge_attr[train_idx]
     train_labels = torch.from_numpy(labels[train_idx]).float()
     pos_count = int((train_labels > 0.5).sum().item())
-    return all_edge_index, all_edge_attr, torch.from_numpy(labels).float(), train_edge_index, train_edge_attr, train_labels, pos_count
+    return (
+        all_edge_index,
+        all_edge_attr,
+        torch.from_numpy(labels).float(),
+        train_edge_index,
+        train_edge_attr,
+        train_labels,
+        pos_count,
+        edge_feature_mean,
+        edge_feature_std,
+    )
 
 
 def build_edge_score_adj(num_nodes: int, edge_index: torch.Tensor, edge_logits: torch.Tensor) -> torch.Tensor:
@@ -193,6 +211,13 @@ def main() -> None:
         node_table = node_table.loc[keep_mask].reset_index(drop=True)
         node_features = node_features[keep_idx]
         node_labels = node_labels[keep_idx]
+    if args.exclude_chroms:
+        excluded = set(_parse_chrom_list(args.exclude_chroms))
+        keep_mask = ~node_table["chr"].astype(str).isin(excluded).to_numpy()
+        keep_idx = torch.from_numpy(keep_mask.nonzero()[0]).long()
+        node_table = node_table.loc[keep_mask].reset_index(drop=True)
+        node_features = node_features[keep_idx]
+        node_labels = node_labels[keep_idx]
 
     if args.sample_size > 0 and args.sample_size < len(node_table):
         sample_idx = node_table.sample(n=args.sample_size, random_state=args.seed).sort_index().index.to_numpy()
@@ -228,6 +253,8 @@ def main() -> None:
             train_edge_attr,
             train_edge_labels,
             train_edge_labels_pos,
+            edge_feature_mean,
+            edge_feature_std,
         ) = edge_supervision
         edge_feature_dim = all_edge_attr.shape[1]
         print(
@@ -299,6 +326,8 @@ def main() -> None:
             train_edge_attr,
             train_edge_labels,
             _,
+            edge_feature_mean,
+            edge_feature_std,
         ) = edge_supervision
         all_edge_index = all_edge_index.to(device)
         all_edge_attr = all_edge_attr.to(device)
@@ -309,6 +338,8 @@ def main() -> None:
     else:
         all_edge_index = all_edge_attr = all_edge_labels = None
         train_edge_index = train_edge_attr = train_edge_labels = None
+        edge_feature_mean = np.zeros(edge_feature_dim, dtype=np.float32)
+        edge_feature_std = np.ones(edge_feature_dim, dtype=np.float32)
 
     history = []
     for epoch in range(1, args.epochs + 1):
@@ -376,6 +407,8 @@ def main() -> None:
             "edge_labels": args.edge_labels,
             "edge_label_col": args.edge_label_col,
             "edge_feature_cols": edge_feature_cols,
+            "edge_feature_mean": edge_feature_mean.tolist(),
+            "edge_feature_std": edge_feature_std.tolist(),
         },
         output_dir / "ep_idgl_outputs.pt",
     )
@@ -391,6 +424,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
 
