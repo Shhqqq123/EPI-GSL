@@ -37,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label-col", type=str, default="atac_signal_sum")
     parser.add_argument("--normalize-features-by-length", action="store_true")
     parser.add_argument("--chrom", type=str, default="")
+    parser.add_argument("--include-chroms", type=str, default="", help="Comma-separated chromosomes included for training, for example chr1,chr2.")
     parser.add_argument("--exclude-chroms", type=str, default="", help="Comma-separated chromosomes excluded from training, for example chr5,chrX,chrY.")
     parser.add_argument("--ep-only", action="store_true")
     parser.add_argument("--hidden-dim", type=int, default=128)
@@ -207,6 +208,13 @@ def main() -> None:
 
     if args.chrom:
         keep_mask = node_table["chr"].astype(str).eq(args.chrom).to_numpy()
+        keep_idx = torch.from_numpy(keep_mask.nonzero()[0]).long()
+        node_table = node_table.loc[keep_mask].reset_index(drop=True)
+        node_features = node_features[keep_idx]
+        node_labels = node_labels[keep_idx]
+    if args.include_chroms:
+        included = set(_parse_chrom_list(args.include_chroms))
+        keep_mask = node_table["chr"].astype(str).isin(included).to_numpy()
         keep_idx = torch.from_numpy(keep_mask.nonzero()[0]).long()
         node_table = node_table.loc[keep_mask].reset_index(drop=True)
         node_features = node_features[keep_idx]
@@ -424,5 +432,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
