@@ -22,6 +22,13 @@ class PeakIDGLOutput:
     edge_logits: Optional[Tensor] = None
 
 
+@dataclass
+class EdgeRerankOutput:
+    node_emb: Tensor
+    edge_logits: Tensor
+    edge_delta_logits: Tensor
+
+
 class EdgePredictionHead(nn.Module):
     def __init__(self, hidden_dim: int, edge_feature_dim: int = 0, dropout: float = 0.2):
         super().__init__()
@@ -45,6 +52,53 @@ class EdgePredictionHead(nn.Module):
                 edge_attr = edge_attr.unsqueeze(-1)
             pair_features.append(edge_attr.float())
         return self.net(torch.cat(pair_features, dim=-1)).squeeze(-1)
+
+
+class EdgeResidualReranker(nn.Module):
+    """Edge-centric reranker that learns a residual correction on top of ABC scores."""
+
+    def __init__(
+        self,
+        num_features: int,
+        hidden_dim: int = 128,
+        dropout: float = 0.2,
+        edge_feature_dim: int = 0,
+        abc_logit_scale: float = 1.0,
+        delta_logit_scale: float = 0.25,
+    ):
+        super().__init__()
+        self.encoder = NodeEncoder(num_features, hidden_dim, dropout)
+        self.edge_head = EdgePredictionHead(hidden_dim, edge_feature_dim=edge_feature_dim, dropout=dropout)
+        self.abc_logit_scale = abc_logit_scale
+        self.delta_logit_scale = delta_logit_scale
+
+    @staticmethod
+    def score_to_logit(scores: Tensor, eps: float = 1e-6) -> Tensor:
+        scores = scores.float().clamp(min=eps, max=1.0 - eps)
+        return torch.logit(scores)
+
+    def forward(
+        self,
+        node_features: Tensor,
+        edge_index: Tensor,
+        edge_attr: Optional[Tensor] = None,
+        edge_base_score: Optional[Tensor] = None,
+        return_output: bool = False,
+    ) -> Union[Tensor, EdgeRerankOutput]:
+        node_emb = self.encoder(node_features.float())
+        edge_delta_logits = self.edge_head(node_emb, edge_index.to(node_emb.device), edge_attr=edge_attr)
+        if edge_base_score is None:
+            edge_logits = self.delta_logit_scale * edge_delta_logits
+        else:
+            base_logits = self.score_to_logit(edge_base_score.to(node_emb.device))
+            edge_logits = self.abc_logit_scale * base_logits + self.delta_logit_scale * edge_delta_logits
+        if return_output:
+            return EdgeRerankOutput(
+                node_emb=node_emb,
+                edge_logits=edge_logits,
+                edge_delta_logits=edge_delta_logits,
+            )
+        return edge_logits
 
 
 class PeakLevelIDGLPyG(nn.Module):
@@ -127,6 +181,4 @@ class PeakLevelIDGLPyG(nn.Module):
         if edge_attr is not None:
             edge_attr = edge_attr.to(node_emb.device)
         return self.edge_head(node_emb, edge_index.to(node_emb.device), edge_attr=edge_attr)
-
-
 

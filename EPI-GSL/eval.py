@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+import pandas as pd
 import torch
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -14,6 +15,8 @@ if str(CURRENT_DIR) not in sys.path:
 from data_utils import build_candidate_adj_from_abc_edges, build_candidate_adj_from_distance, load_abc_edges, load_hic_bedpe
 from eval_utils import (
     compare_topk_edges,
+    evaluate_edge_score_table_label_ranking,
+    evaluate_edge_score_table_with_hic,
     evaluate_edge_label_ranking,
     evaluate_with_hic,
     filter_bedpe_to_node_chroms,
@@ -67,6 +70,33 @@ def _print_edge_label_metrics(name: str, metrics: dict[str, float], topks: list[
         )
 
 
+def _load_edge_scores(bundle: dict, outputs_path: str) -> pd.DataFrame | None:
+    candidate_paths = []
+    if bundle.get("edge_score_table_path"):
+        candidate_paths.append(Path(bundle["edge_score_table_path"]))
+    candidate_paths.append(Path(outputs_path).resolve().parent / "edge_scores.tsv")
+    for path in candidate_paths:
+        if path.exists():
+            print(f"Loading edge score table: {path}")
+            return pd.read_csv(path, sep="\t")
+    return None
+
+
+def _merge_eval_labels(edge_scores: pd.DataFrame, edge_label_path: str, label_col: str) -> tuple[pd.DataFrame, str]:
+    if not edge_label_path:
+        return edge_scores, label_col
+    label_df = pd.read_csv(edge_label_path, sep="\t")
+    required = ["re_node_id", "promoter_node_id", label_col]
+    missing = [col for col in required if col not in label_df.columns]
+    if missing:
+        raise KeyError(f"Edge label table is missing required columns: {missing}")
+    eval_label_col = f"{label_col}_eval"
+    label_df = label_df[required].rename(columns={label_col: eval_label_col})
+    merged = edge_scores.merge(label_df, on=["re_node_id", "promoter_node_id"], how="left")
+    merged[eval_label_col] = pd.to_numeric(merged[eval_label_col], errors="coerce").fillna(0.0)
+    return merged, eval_label_col
+
+
 def main() -> None:
     args = parse_args()
     print(f"Loading bundle: {args.outputs_path}")
@@ -75,6 +105,89 @@ def main() -> None:
     node_table = bundle["node_table"]
     optimized_adj = bundle["optimized_adj"]
     edge_supervised_adj = bundle.get("edge_supervised_adj")
+    edge_scores = _load_edge_scores(bundle, args.outputs_path)
+
+    if edge_scores is not None:
+        print("Using edge-score table evaluation path.")
+        print(f"Loading Hi-C bedpe ({args.hic_split_name}): {args.hic_bedpe}")
+        hic_df = load_hic_bedpe(args.hic_bedpe)
+        filtered_hic_df = filter_bedpe_to_node_chroms(hic_df, node_table)
+        node_chroms = ",".join(sorted(node_table["chr"].astype(str).unique()))
+        print(f"Node chromosomes: {node_chroms}")
+        print(f"Hi-C loops before chrom filter: {len(hic_df)}")
+        print(f"Hi-C loops after chrom filter: {len(filtered_hic_df)}")
+
+        init_metrics = evaluate_edge_score_table_with_hic(edge_scores, filtered_hic_df, score_col=args.abc_score_col, topk=args.topk)
+        edge_metrics = evaluate_edge_score_table_with_hic(edge_scores, filtered_hic_df, score_col="final_score", topk=args.topk)
+        print("Initial ABC edge-table metrics:")
+        print(
+            f"topk={int(init_metrics['topk'])} "
+            f"hit_count={int(init_metrics['hit_count'])} "
+            f"hit_rate={init_metrics['hit_rate']:.6f}"
+        )
+        print("Residual edge-rerank metrics:")
+        print(
+            f"topk={int(edge_metrics['topk'])} "
+            f"hit_count={int(edge_metrics['hit_count'])} "
+            f"hit_rate={edge_metrics['hit_rate']:.6f}"
+        )
+        print(f"Residual delta hit_rate={edge_metrics['hit_rate'] - init_metrics['hit_rate']:.6f}")
+
+        topks = _parse_topks(args.edge_metric_topks)
+        edge_scores_for_labels, label_col = _merge_eval_labels(edge_scores, args.edge_labels, args.edge_label_col)
+        init_edge_label_metrics = None
+        edge_sup_label_metrics = None
+        if label_col in edge_scores_for_labels.columns:
+            print(f"Edge label column: {label_col}")
+            init_edge_label_metrics = evaluate_edge_score_table_label_ranking(
+                edge_scores_for_labels,
+                score_col=args.abc_score_col,
+                label_col=label_col,
+                topks=topks,
+            )
+            edge_sup_label_metrics = evaluate_edge_score_table_label_ranking(
+                edge_scores_for_labels,
+                score_col="final_score",
+                label_col=label_col,
+                topks=topks,
+            )
+            _print_edge_label_metrics("Initial ABC", init_edge_label_metrics, topks)
+            _print_edge_label_metrics("Residual edge-rerank", edge_sup_label_metrics, topks)
+
+        if args.metrics_output:
+            result = {
+                "outputs_path": args.outputs_path,
+                "abc_edges": args.abc_edges,
+                "hic_bedpe": args.hic_bedpe,
+                "hic_split_name": args.hic_split_name,
+                "edge_labels": args.edge_labels,
+                "edge_label_col": args.edge_label_col,
+                "topk": args.topk,
+                "edge_metric_topks": topks,
+                "node_chromosomes": sorted(node_table["chr"].astype(str).unique().tolist()),
+                "hic_loops_before_chrom_filter": int(len(hic_df)),
+                "hic_loops_after_chrom_filter": int(len(filtered_hic_df)),
+                "hic_overlap_metrics": {
+                    "initial": init_metrics,
+                    "optimized": None,
+                    "edge_supervised": edge_metrics,
+                },
+                "ranking_diagnostics": {
+                    "initial_vs_optimized": None,
+                    "initial_vs_edge_supervised": None,
+                },
+                "edge_label_ranking_metrics": {
+                    "initial": init_edge_label_metrics,
+                    "optimized": None,
+                    "edge_supervised": edge_sup_label_metrics,
+                },
+            }
+            output_path = Path(args.metrics_output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+            print(f"Saved metrics JSON to {output_path}")
+        return
 
     if args.abc_edges:
         print(f"Rebuilding initial adjacency from ABC edges: {args.abc_edges}")

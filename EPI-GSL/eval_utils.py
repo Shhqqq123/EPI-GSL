@@ -84,6 +84,87 @@ def evaluate_with_hic(
     }
 
 
+def _interval_overlap(chr_a: str, start_a: int, end_a: int, chr_b: str, start_b: int, end_b: int) -> bool:
+    if chr_a != chr_b:
+        return False
+    return not (end_a < start_b or end_b < start_a)
+
+
+def _edge_row_hits_loop(edge: pd.Series, loop: pd.Series) -> bool:
+    direct = _interval_overlap(
+        str(edge["chr"]),
+        int(edge["re_start"]),
+        int(edge["re_end"]),
+        str(loop["chr1"]),
+        int(loop["start1"]),
+        int(loop["end1"]),
+    ) and _interval_overlap(
+        str(edge["chr"]),
+        int(edge["prom_start"]),
+        int(edge["prom_end"]),
+        str(loop["chr2"]),
+        int(loop["start2"]),
+        int(loop["end2"]),
+    )
+    swapped = _interval_overlap(
+        str(edge["chr"]),
+        int(edge["re_start"]),
+        int(edge["re_end"]),
+        str(loop["chr2"]),
+        int(loop["start2"]),
+        int(loop["end2"]),
+    ) and _interval_overlap(
+        str(edge["chr"]),
+        int(edge["prom_start"]),
+        int(edge["prom_end"]),
+        str(loop["chr1"]),
+        int(loop["start1"]),
+        int(loop["end1"]),
+    )
+    return direct or swapped
+
+
+def evaluate_edge_score_table_with_hic(
+    edge_scores: pd.DataFrame,
+    hic_bedpe: pd.DataFrame,
+    score_col: str,
+    topk: int = 1000,
+) -> Dict[str, float]:
+    required = ["chr", "re_start", "re_end", "prom_start", "prom_end", score_col]
+    missing = [col for col in required if col not in edge_scores.columns]
+    if missing:
+        raise KeyError(f"Edge score table is missing required columns: {missing}")
+    if {"chr1", "start1", "end1", "chr2", "start2", "end2"}.issubset(hic_bedpe.columns):
+        bedpe = hic_bedpe[["chr1", "start1", "end1", "chr2", "start2", "end2"]].copy()
+    else:
+        bedpe = bedpe_to_anchor_pairs(hic_bedpe)
+    bedpe["chr1"] = bedpe["chr1"].astype(str)
+    bedpe["chr2"] = bedpe["chr2"].astype(str)
+    edges = edge_scores.copy()
+    edges[score_col] = pd.to_numeric(edges[score_col], errors="coerce")
+    edges = edges[np.isfinite(edges[score_col].to_numpy(dtype=np.float64))].copy()
+    if edges.empty or topk <= 0:
+        return {"topk": 0.0, "hit_count": 0.0, "hit_rate": 0.0}
+
+    actual_topk = min(int(topk), len(edges))
+    top_edges = edges.sort_values(score_col, ascending=False).head(actual_topk)
+    hits = 0
+    for _, edge in top_edges.iterrows():
+        chrom = str(edge["chr"])
+        loops_chr = bedpe[bedpe["chr1"].eq(chrom) & bedpe["chr2"].eq(chrom)]
+        ok = False
+        for _, loop in loops_chr.iterrows():
+            if _edge_row_hits_loop(edge, loop):
+                ok = True
+                break
+        hits += int(ok)
+    return {
+        "topk": float(actual_topk),
+        "hit_count": float(hits),
+        "hit_rate": float(hits) / float(actual_topk) if actual_topk > 0 else 0.0,
+    }
+
+
 def topk_edge_set(predicted_adj: Tensor, topk: int = 1000) -> Set[Tuple[int, int]]:
     if predicted_adj.is_sparse:
         predicted_adj = predicted_adj.to_dense()
@@ -221,6 +302,51 @@ def evaluate_edge_label_ranking(
     if n_edges == 0:
         return metrics
 
+    order = np.argsort(scores, kind="mergesort")[::-1]
+    sorted_labels = labels[order]
+    for requested_k in topks:
+        k = int(requested_k)
+        if k <= 0:
+            continue
+        actual_k = min(k, n_edges)
+        hits = int(sorted_labels[:actual_k].sum())
+        precision = float(hits) / float(actual_k) if actual_k > 0 else 0.0
+        recall = float(hits) / float(n_pos) if n_pos > 0 else 0.0
+        enrichment = precision / prevalence if prevalence > 0 else float("nan")
+        metrics[f"hit_count_at_{k}"] = float(hits)
+        metrics[f"precision_at_{k}"] = precision
+        metrics[f"recall_at_{k}"] = recall
+        metrics[f"enrichment_at_{k}"] = enrichment
+    return metrics
+
+
+def evaluate_edge_score_table_label_ranking(
+    edge_scores: pd.DataFrame,
+    score_col: str,
+    label_col: str,
+    topks: Iterable[int] = (500, 1000, 2000),
+) -> Dict[str, float]:
+    required = [score_col, label_col]
+    missing = [col for col in required if col not in edge_scores.columns]
+    if missing:
+        raise KeyError(f"Edge score table is missing required columns: {missing}")
+    scores = pd.to_numeric(edge_scores[score_col], errors="coerce").to_numpy(dtype=np.float64)
+    labels = pd.to_numeric(edge_scores[label_col], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+    valid = np.isfinite(scores)
+    scores = scores[valid]
+    labels = (labels[valid] > 0.5).astype(np.int8)
+    n_edges = int(len(labels))
+    n_pos = int(labels.sum())
+    prevalence = float(n_pos) / float(n_edges) if n_edges > 0 else 0.0
+    metrics: Dict[str, float] = {
+        "num_edges": float(n_edges),
+        "positive_edges": float(n_pos),
+        "prevalence": prevalence,
+        "auroc": _roc_auc(labels, scores) if n_edges > 0 else float("nan"),
+        "auprc": _average_precision(labels, scores) if n_edges > 0 else float("nan"),
+    }
+    if n_edges == 0:
+        return metrics
     order = np.argsort(scores, kind="mergesort")[::-1]
     sorted_labels = labels[order]
     for requested_k in topks:

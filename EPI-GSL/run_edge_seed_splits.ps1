@@ -17,6 +17,10 @@ param(
     [double]$SmoothWeight = 0.01,
     [double]$EdgeLossWeight = 1.0,
     [double]$NegativeRatio = 5.0,
+    [string]$NegativeSampling = "abc-distance-matched",
+    [double]$RankingLossWeight = 0.1,
+    [double]$DeltaL2Weight = 0.001,
+    [double]$DeltaLogitScale = 0.25,
     [string]$LabelCol = "log1p_atac_signal_per_kb",
     [string]$EvalTopK = "1000",
     [string]$EdgeMetricTopKs = "500,1000,2000",
@@ -98,6 +102,7 @@ foreach ($seed in $seedList) {
 
     Invoke-Step -Name "train $seedTag" -LogPath (Join-Path $runDir "train.log") -CommandArgs @(
         $trainScript,
+        "--model-mode", "edge-rerank",
         "--promoter-path", $PromoterPath,
         "--re-path", $RePath,
         "--output-dir", $runDir,
@@ -117,6 +122,10 @@ foreach ($seed in $seedList) {
         "--smooth-weight", "$SmoothWeight",
         "--edge-loss-weight", "$EdgeLossWeight",
         "--negative-ratio", "$NegativeRatio",
+        "--negative-sampling", $NegativeSampling,
+        "--ranking-loss-weight", "$RankingLossWeight",
+        "--delta-l2-weight", "$DeltaL2Weight",
+        "--delta-logit-scale", "$DeltaLogitScale",
         "--seed", "$seed",
         "--ep-only"
     )
