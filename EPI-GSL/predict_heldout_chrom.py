@@ -15,7 +15,7 @@ if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
 from data_utils import build_candidate_adj_from_abc_edges, load_abc_edges, load_peak_node_tables
-from model import EdgeResidualReranker, PeakLevelIDGLPyG
+from model import EdgeResidualReranker, PeakLevelIDGLPyG, SparseIterativeGSLReranker
 from train import _edge_feature_frame, _parse_edge_feature_cols, build_edge_score_adj, build_edge_score_table
 
 
@@ -125,15 +125,22 @@ def main() -> None:
 
     device = torch.device(args.device)
     model_mode = train_config.get("model_mode", "dense-idgl")
-    if model_mode == "edge-rerank":
-        model = EdgeResidualReranker(
-            num_features=node_features.shape[1],
-            hidden_dim=int(train_config.get("hidden_dim", 128)),
-            dropout=float(train_config.get("dropout", 0.2)),
-            edge_feature_dim=len(edge_feature_cols),
-            abc_logit_scale=float(train_config.get("abc_logit_scale", 1.0)),
-            delta_logit_scale=float(train_config.get("delta_logit_scale", 0.25)),
-        ).to(device)
+    if model_mode in {"edge-rerank", "sparse-gsl"}:
+        model_kwargs = {
+            "num_features": node_features.shape[1],
+            "hidden_dim": int(train_config.get("hidden_dim", 128)),
+            "dropout": float(train_config.get("dropout", 0.2)),
+            "edge_feature_dim": len(edge_feature_cols),
+            "abc_logit_scale": float(train_config.get("abc_logit_scale", 1.0)),
+            "delta_logit_scale": float(train_config.get("delta_logit_scale", 0.25)),
+        }
+        if model_mode == "sparse-gsl":
+            model = SparseIterativeGSLReranker(
+                graph_iters=int(train_config.get("graph_iters", 2)),
+                **model_kwargs,
+            ).to(device)
+        else:
+            model = EdgeResidualReranker(**model_kwargs).to(device)
         model.load_state_dict(torch.load(args.model_path, map_location=device))
         model.eval()
 
@@ -157,6 +164,8 @@ def main() -> None:
             edge_logits=output.edge_logits,
             edge_delta_logits=output.edge_delta_logits,
             base_scores=edge_base_score,
+            score_blend_alpha=train_config.get("selected_score_blend_alpha"),
+            score_blend_method=train_config.get("selected_score_blend_method", train_config.get("score_blend_method", "rank")),
         )
         edge_score_path = output_dir / "edge_scores.tsv"
         edge_score_table.to_csv(edge_score_path, sep="\t", index=False)
@@ -167,14 +176,14 @@ def main() -> None:
 
         torch.save(
             {
-                "model_mode": "edge-rerank",
+                "model_mode": model_mode,
                 "optimized_adj": None,
                 "edge_supervised_adj": edge_supervised_adj.detach().cpu() if edge_supervised_adj is not None else None,
                 "node_pred": None,
                 "node_labels": node_labels.detach().cpu(),
                 "feature_cols": feature_cols,
                 "node_table": node_table,
-                "adj_source": "abc_residual_edge_table",
+                "adj_source": "abc_sparse_edge_table",
                 "abc_edges": args.abc_edges,
                 "abc_score_col": args.abc_score_col,
                 "edge_labels": args.edge_table,
@@ -184,6 +193,12 @@ def main() -> None:
                 "edge_score_table_path": str(edge_score_path),
                 "abc_logit_scale": float(train_config.get("abc_logit_scale", 1.0)),
                 "delta_logit_scale": float(train_config.get("delta_logit_scale", 0.25)),
+                "selected_score_blend_alpha": train_config.get("selected_score_blend_alpha"),
+                "selected_score_blend_method": train_config.get(
+                    "selected_score_blend_method",
+                    train_config.get("score_blend_method", "rank"),
+                ),
+                "score_blend_report": train_config.get("score_blend_report"),
                 "heldout_chrom": args.chrom,
                 "train_bundle": args.train_bundle,
             },

@@ -35,6 +35,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--edge-labels", type=str, default="", help="Optional edge label TSV used for AUROC/AUPRC ranking metrics.")
     parser.add_argument("--edge-label-col", type=str, default="edge_label_test", help="Column in --edge-labels used for ranking evaluation.")
     parser.add_argument("--edge-metric-topks", type=str, default="500,1000,2000", help="Comma-separated K values for precision/recall at K.")
+    parser.add_argument(
+        "--edge-score-col",
+        type=str,
+        default="auto",
+        help="Learned edge score column. Use 'auto' to prefer blended_score when present, otherwise final_score.",
+    )
     parser.add_argument("--hic-split-name", type=str, default="all", help="Label printed for the Hi-C BEDPE split being evaluated.")
     parser.add_argument("--metrics-output", type=str, default="", help="Optional JSON path for saving all evaluation metrics.")
     parser.add_argument("--ep-only", action="store_true")
@@ -117,15 +123,22 @@ def main() -> None:
         print(f"Hi-C loops before chrom filter: {len(hic_df)}")
         print(f"Hi-C loops after chrom filter: {len(filtered_hic_df)}")
 
+        learned_score_col = args.edge_score_col
+        if learned_score_col == "auto":
+            learned_score_col = "blended_score" if "blended_score" in edge_scores.columns else "final_score"
+        if learned_score_col not in edge_scores.columns:
+            raise KeyError(f"Edge score table is missing learned score column: {learned_score_col}")
+        print(f"Learned edge score column: {learned_score_col}")
+
         init_metrics = evaluate_edge_score_table_with_hic(edge_scores, filtered_hic_df, score_col=args.abc_score_col, topk=args.topk)
-        edge_metrics = evaluate_edge_score_table_with_hic(edge_scores, filtered_hic_df, score_col="final_score", topk=args.topk)
+        edge_metrics = evaluate_edge_score_table_with_hic(edge_scores, filtered_hic_df, score_col=learned_score_col, topk=args.topk)
         print("Initial ABC edge-table metrics:")
         print(
             f"topk={int(init_metrics['topk'])} "
             f"hit_count={int(init_metrics['hit_count'])} "
             f"hit_rate={init_metrics['hit_rate']:.6f}"
         )
-        print("Residual edge-rerank metrics:")
+        print(f"Residual edge-rerank metrics ({learned_score_col}):")
         print(
             f"topk={int(edge_metrics['topk'])} "
             f"hit_count={int(edge_metrics['hit_count'])} "
@@ -147,12 +160,12 @@ def main() -> None:
             )
             edge_sup_label_metrics = evaluate_edge_score_table_label_ranking(
                 edge_scores_for_labels,
-                score_col="final_score",
+                score_col=learned_score_col,
                 label_col=label_col,
                 topks=topks,
             )
             _print_edge_label_metrics("Initial ABC", init_edge_label_metrics, topks)
-            _print_edge_label_metrics("Residual edge-rerank", edge_sup_label_metrics, topks)
+            _print_edge_label_metrics(f"Residual edge-rerank ({learned_score_col})", edge_sup_label_metrics, topks)
 
         if args.metrics_output:
             result = {
@@ -162,6 +175,7 @@ def main() -> None:
                 "hic_split_name": args.hic_split_name,
                 "edge_labels": args.edge_labels,
                 "edge_label_col": args.edge_label_col,
+                "edge_score_col": learned_score_col,
                 "topk": args.topk,
                 "edge_metric_topks": topks,
                 "node_chromosomes": sorted(node_table["chr"].astype(str).unique().tolist()),

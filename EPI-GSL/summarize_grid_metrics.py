@@ -97,9 +97,16 @@ def main() -> None:
 
     show_cols = [
         "config",
+        "model_mode",
         "delta_logit_scale",
         "delta_l2_weight",
         "ranking_loss_weight",
+        "hard_rank_loss_weight",
+        "abc_rank_loss_weight",
+        "hard_negative_ratio",
+        "validation_fraction",
+        "validation_metric",
+        "early_stopping_patience",
         "negative_sampling",
         "initial_hit_count_at_1000_mean",
         "edge_supervised_hit_count_at_1000_mean",

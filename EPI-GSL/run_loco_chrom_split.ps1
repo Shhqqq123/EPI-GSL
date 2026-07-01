@@ -6,6 +6,8 @@ param(
     [string]$HicBedpe = "D:\Documents\Playground\ENCFF308MMM.bedpe\ENCFF308MMM.bedpe",
     [string]$TrainChroms = "chr1,chr2,chr3,chr4,chr6,chr7,chr8,chr9,chr10,chr11,chr12,chr13,chr14,chr15,chr16,chr17,chr18,chr19,chr20,chr21,chr22",
     [string]$TestChrom = "chr5",
+    [string]$ModelMode = "edge-rerank",
+    [switch]$ChromBatchTraining,
     [int]$SampleSize = 5000,
     [int]$Epochs = 300,
     [double]$Lr = 0.0005,
@@ -17,9 +19,29 @@ param(
     [double]$EdgeLossWeight = 1.0,
     [double]$NegativeRatio = 5.0,
     [string]$NegativeSampling = "abc-distance-matched",
+    [double]$HardNegativeRatio = 0.0,
     [double]$RankingLossWeight = 0.1,
+    [double]$HardRankLossWeight = 0.0,
+    [double]$HardRankMargin = 0.5,
+    [int]$HardRankNegativesPerPositive = 4,
+    [int]$HardRankMaxPairs = 50000,
+    [double]$HardRankTopNegativeRatio = 20.0,
+    [double]$AbcRankLossWeight = 0.0,
+    [double]$AbcRankMargin = 0.0,
+    [int]$AbcRankMaxPairs = 50000,
+    [double]$AbcRankMinScoreGap = 0.0,
+    [string]$AbcRankScope = "negatives",
     [double]$DeltaL2Weight = 0.001,
     [double]$DeltaLogitScale = 0.25,
+    [double]$ValidationFraction = 0.0,
+    [string]$ValidationChroms = "",
+    [string]$ValidationMetric = "auprc",
+    [int]$EarlyStoppingPatience = 0,
+    [int]$EarlyStoppingMinEpochs = 0,
+    [double]$ScoreBlendAlpha = -1.0,
+    [string]$ScoreBlendAlphas = "",
+    [string]$ScoreBlendMethod = "rank",
+    [string]$ScoreBlendMetric = "auprc",
     [string]$LabelCol = "log1p_atac_signal_per_kb",
     [int]$EvalTopK = 1000,
     [string]$EdgeMetricTopKs = "500,1000,2000",
@@ -131,9 +153,9 @@ $predDir = Join-Path $OutputRoot ("pred_{0}" -f $TestChrom)
 New-Item -ItemType Directory -Force -Path $trainDir | Out-Null
 New-Item -ItemType Directory -Force -Path $predDir | Out-Null
 
-Invoke-Step -Name "train-loco" -LogPath (Join-Path $OutputRoot "train.log") -CommandArgs @(
+$trainArgs = @(
     $trainScript,
-    "--model-mode", "edge-rerank",
+    "--model-mode", $ModelMode,
     "--promoter-path", $PromoterPath,
     "--re-path", $RePath,
     "--output-dir", $trainDir,
@@ -154,11 +176,35 @@ Invoke-Step -Name "train-loco" -LogPath (Join-Path $OutputRoot "train.log") -Com
     "--edge-loss-weight", "$EdgeLossWeight",
     "--negative-ratio", "$NegativeRatio",
     "--negative-sampling", $NegativeSampling,
+    "--hard-negative-ratio", "$HardNegativeRatio",
     "--ranking-loss-weight", "$RankingLossWeight",
+    "--hard-rank-loss-weight", "$HardRankLossWeight",
+    "--hard-rank-margin", "$HardRankMargin",
+    "--hard-rank-negatives-per-positive", "$HardRankNegativesPerPositive",
+    "--hard-rank-max-pairs", "$HardRankMaxPairs",
+    "--hard-rank-top-negative-ratio", "$HardRankTopNegativeRatio",
+    "--abc-rank-loss-weight", "$AbcRankLossWeight",
+    "--abc-rank-margin", "$AbcRankMargin",
+    "--abc-rank-max-pairs", "$AbcRankMaxPairs",
+    "--abc-rank-min-score-gap", "$AbcRankMinScoreGap",
+    "--abc-rank-scope", $AbcRankScope,
     "--delta-l2-weight", "$DeltaL2Weight",
     "--delta-logit-scale", "$DeltaLogitScale",
+    "--validation-fraction", "$ValidationFraction",
+    "--validation-chroms", $ValidationChroms,
+    "--validation-metric", $ValidationMetric,
+    "--early-stopping-patience", "$EarlyStoppingPatience",
+    "--early-stopping-min-epochs", "$EarlyStoppingMinEpochs",
+    "--score-blend-alpha", "$ScoreBlendAlpha",
+    "--score-blend-alphas", $ScoreBlendAlphas,
+    "--score-blend-method", $ScoreBlendMethod,
+    "--score-blend-metric", $ScoreBlendMetric,
     "--ep-only"
 )
+if ($ChromBatchTraining) {
+    $trainArgs += "--chrom-batch-training"
+}
+Invoke-Step -Name "train-loco" -LogPath (Join-Path $OutputRoot "train.log") -CommandArgs $trainArgs
 
 Invoke-Step -Name "predict-heldout-$TestChrom" -LogPath (Join-Path $OutputRoot "predict_heldout.log") -CommandArgs @(
     $predictScript,

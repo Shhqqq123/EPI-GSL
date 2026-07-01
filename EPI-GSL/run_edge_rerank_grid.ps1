@@ -6,6 +6,7 @@ param(
     [string]$HicBedpe = "D:\Documents\Playground\ENCFF308MMM.bedpe\ENCFF308MMM.bedpe",
     [string]$Chrom = "chr5",
     [string]$Seeds = "1,2,3,4,5",
+    [string]$ModelMode = "edge-rerank",
     [double]$TestFraction = 0.2,
     [int]$SampleSize = 5000,
     [int]$Epochs = 300,
@@ -13,9 +14,16 @@ param(
     [double]$EdgeLossWeight = 1.0,
     [double]$NegativeRatio = 5.0,
     [string]$NegativeSampling = "abc-distance-matched",
+    [double]$HardNegativeRatio = 0.0,
     [string]$RankingLossWeights = "0.1",
+    [string]$HardRankLossWeights = "0.0",
+    [string]$AbcRankLossWeights = "0.0",
     [string]$DeltaL2Weights = "0.001,0.01",
     [string]$DeltaLogitScales = "0.1,0.25,0.5",
+    [double]$ValidationFraction = 0.0,
+    [string]$ValidationMetric = "auprc",
+    [int]$EarlyStoppingPatience = 0,
+    [int]$EarlyStoppingMinEpochs = 0,
     [string]$LabelCol = "log1p_atac_signal_per_kb",
     [string]$EvalTopK = "1000",
     [string]$EdgeMetricTopKs = "500,1000,2000",
@@ -78,60 +86,82 @@ foreach ($path in @($seedScript, $gridSummaryScript, $PromoterPath, $RePath, $Hi
 
 New-Item -ItemType Directory -Force -Path $GridRoot | Out-Null
 $rankingList = Parse-DoubleList $RankingLossWeights
+$hardRankingList = Parse-DoubleList $HardRankLossWeights
+$abcRankingList = Parse-DoubleList $AbcRankLossWeights
 $deltaL2List = Parse-DoubleList $DeltaL2Weights
 $deltaScaleList = Parse-DoubleList $DeltaLogitScales
 
 foreach ($rankingWeight in $rankingList) {
-    foreach ($deltaL2 in $deltaL2List) {
-        foreach ($deltaScale in $deltaScaleList) {
-            $tag = "rank{0}_l2{1}_scale{2}" -f (Format-ParamTag $rankingWeight), (Format-ParamTag $deltaL2), (Format-ParamTag $deltaScale)
-            $runRoot = Join-Path $GridRoot $tag
-            New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
+    foreach ($hardRankingWeight in $hardRankingList) {
+        foreach ($abcRankingWeight in $abcRankingList) {
+            foreach ($deltaL2 in $deltaL2List) {
+                foreach ($deltaScale in $deltaScaleList) {
+                $tag = "rank{0}_hard{1}_abc{2}_l2{3}_scale{4}" -f (Format-ParamTag $rankingWeight), (Format-ParamTag $hardRankingWeight), (Format-ParamTag $abcRankingWeight), (Format-ParamTag $deltaL2), (Format-ParamTag $deltaScale)
+                $runRoot = Join-Path $GridRoot $tag
+                New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 
-            $params = [ordered]@{
-                config = $tag
-                chrom = $Chrom
-                seeds = $Seeds
-                negative_sampling = $NegativeSampling
-                ranking_loss_weight = $rankingWeight
-                delta_l2_weight = $deltaL2
-                delta_logit_scale = $deltaScale
-                sample_size = $SampleSize
-                epochs = $Epochs
-                lr = $Lr
-            }
-            if (-not $DryRun) {
-                $params | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runRoot "grid_params.json") -Encoding UTF8
-            }
+                $params = [ordered]@{
+                    config = $tag
+                    model_mode = $ModelMode
+                    chrom = $Chrom
+                    seeds = $Seeds
+                    negative_sampling = $NegativeSampling
+                    hard_negative_ratio = $HardNegativeRatio
+                    ranking_loss_weight = $rankingWeight
+                    hard_rank_loss_weight = $hardRankingWeight
+                    abc_rank_loss_weight = $abcRankingWeight
+                    delta_l2_weight = $deltaL2
+                    delta_logit_scale = $deltaScale
+                    validation_fraction = $ValidationFraction
+                    validation_metric = $ValidationMetric
+                    early_stopping_patience = $EarlyStoppingPatience
+                    early_stopping_min_epochs = $EarlyStoppingMinEpochs
+                    sample_size = $SampleSize
+                    epochs = $Epochs
+                    lr = $Lr
+                }
+                if (-not $DryRun) {
+                    $params | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runRoot "grid_params.json") -Encoding UTF8
+                }
 
-            Invoke-Step -Name "grid $tag" -LogPath (Join-Path $runRoot "grid_run.log") -CommandArgs @(
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy", "Bypass",
-                "-File", $seedScript,
-                "-PythonExe", $PythonExe,
-                "-ProjectRoot", $ProjectRoot,
-                "-PromoterPath", $PromoterPath,
-                "-RePath", $RePath,
-                "-HicBedpe", $HicBedpe,
-                "-Chrom", $Chrom,
-                "-Seeds", $Seeds,
-                "-TestFraction", "$TestFraction",
-                "-SampleSize", "$SampleSize",
-                "-Epochs", "$Epochs",
-                "-Lr", "$Lr",
-                "-EdgeLossWeight", "$EdgeLossWeight",
-                "-NegativeRatio", "$NegativeRatio",
-                "-NegativeSampling", $NegativeSampling,
-                "-RankingLossWeight", "$rankingWeight",
-                "-DeltaL2Weight", "$deltaL2",
-                "-DeltaLogitScale", "$deltaScale",
-                "-LabelCol", $LabelCol,
-                "-EvalTopK", $EvalTopK,
-                "-EdgeMetricTopKs", $EdgeMetricTopKs,
-                "-WorkDir", $WorkDir,
-                "-OutputRoot", $runRoot
-            )
+                Invoke-Step -Name "grid $tag" -LogPath (Join-Path $runRoot "grid_run.log") -CommandArgs @(
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy", "Bypass",
+                    "-File", $seedScript,
+                    "-PythonExe", $PythonExe,
+                    "-ProjectRoot", $ProjectRoot,
+                    "-PromoterPath", $PromoterPath,
+                    "-RePath", $RePath,
+                    "-HicBedpe", $HicBedpe,
+                    "-Chrom", $Chrom,
+                    "-Seeds", $Seeds,
+                    "-ModelMode", $ModelMode,
+                    "-TestFraction", "$TestFraction",
+                    "-SampleSize", "$SampleSize",
+                    "-Epochs", "$Epochs",
+                    "-Lr", "$Lr",
+                    "-EdgeLossWeight", "$EdgeLossWeight",
+                    "-NegativeRatio", "$NegativeRatio",
+                    "-NegativeSampling", $NegativeSampling,
+                    "-HardNegativeRatio", "$HardNegativeRatio",
+                    "-RankingLossWeight", "$rankingWeight",
+                    "-HardRankLossWeight", "$hardRankingWeight",
+                    "-AbcRankLossWeight", "$abcRankingWeight",
+                    "-DeltaL2Weight", "$deltaL2",
+                    "-DeltaLogitScale", "$deltaScale",
+                    "-ValidationFraction", "$ValidationFraction",
+                    "-ValidationMetric", $ValidationMetric,
+                    "-EarlyStoppingPatience", "$EarlyStoppingPatience",
+                    "-EarlyStoppingMinEpochs", "$EarlyStoppingMinEpochs",
+                    "-LabelCol", $LabelCol,
+                    "-EvalTopK", $EvalTopK,
+                    "-EdgeMetricTopKs", $EdgeMetricTopKs,
+                    "-WorkDir", $WorkDir,
+                    "-OutputRoot", $runRoot
+                )
+                }
+            }
         }
     }
 }

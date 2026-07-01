@@ -29,6 +29,35 @@ class EdgeRerankOutput:
     edge_delta_logits: Tensor
 
 
+class SparseWeightedMessageLayer(nn.Module):
+    def __init__(self, hidden_dim: int, dropout: float = 0.2):
+        super().__init__()
+        self.self_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.neigh_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.dropout = dropout
+
+    def forward(self, h: Tensor, edge_index: Tensor, edge_weight: Tensor) -> Tensor:
+        edge_index = edge_index.to(h.device)
+        edge_weight = edge_weight.to(h.device).float()
+        src = edge_index[0]
+        dst = edge_index[1]
+
+        msg_src = h[src] * edge_weight.unsqueeze(-1)
+        msg_dst = h[dst] * edge_weight.unsqueeze(-1)
+        agg = torch.zeros_like(h)
+        deg = torch.zeros(h.size(0), dtype=h.dtype, device=h.device)
+        agg.index_add_(0, dst, msg_src)
+        agg.index_add_(0, src, msg_dst)
+        deg.index_add_(0, dst, edge_weight)
+        deg.index_add_(0, src, edge_weight)
+        agg = agg / deg.clamp_min(1e-6).unsqueeze(-1)
+
+        update = self.self_proj(h) + self.neigh_proj(agg)
+        update = F.dropout(F.relu(update), p=self.dropout, training=self.training)
+        return self.norm(h + update)
+
+
 class EdgePredictionHead(nn.Module):
     def __init__(self, hidden_dim: int, edge_feature_dim: int = 0, dropout: float = 0.2):
         super().__init__()
@@ -99,6 +128,91 @@ class EdgeResidualReranker(nn.Module):
                 edge_delta_logits=edge_delta_logits,
             )
         return edge_logits
+
+
+class SparseIterativeGSLReranker(nn.Module):
+    """Sparse graph structure learner on ABC candidate edges.
+
+    Edge weights update node embeddings through sparse message passing, then the updated
+    embeddings predict residual edge logits on the same candidate edge set.
+    """
+
+    def __init__(
+        self,
+        num_features: int,
+        hidden_dim: int = 128,
+        dropout: float = 0.2,
+        edge_feature_dim: int = 0,
+        graph_iters: int = 2,
+        abc_logit_scale: float = 1.0,
+        delta_logit_scale: float = 0.25,
+    ):
+        super().__init__()
+        self.encoder = NodeEncoder(num_features, hidden_dim, dropout)
+        self.edge_head = EdgePredictionHead(hidden_dim, edge_feature_dim=edge_feature_dim, dropout=dropout)
+        self.message_layers = nn.ModuleList(
+            [SparseWeightedMessageLayer(hidden_dim, dropout=dropout) for _ in range(max(1, graph_iters))]
+        )
+        self.graph_iters = max(1, graph_iters)
+        self.abc_logit_scale = abc_logit_scale
+        self.delta_logit_scale = delta_logit_scale
+
+    @staticmethod
+    def score_to_logit(scores: Tensor, eps: float = 1e-6) -> Tensor:
+        scores = scores.float().clamp(min=eps, max=1.0 - eps)
+        return torch.logit(scores)
+
+    def forward(
+        self,
+        node_features: Tensor,
+        edge_index: Tensor,
+        edge_attr: Optional[Tensor] = None,
+        edge_base_score: Optional[Tensor] = None,
+        score_edge_index: Optional[Tensor] = None,
+        score_edge_attr: Optional[Tensor] = None,
+        score_edge_base_score: Optional[Tensor] = None,
+        return_output: bool = False,
+    ) -> Union[Tensor, EdgeRerankOutput]:
+        h = self.encoder(node_features.float())
+        edge_index = edge_index.to(h.device)
+        if edge_attr is not None:
+            edge_attr = edge_attr.to(h.device)
+        if score_edge_index is None:
+            score_edge_index = edge_index
+            score_edge_attr = edge_attr
+            score_edge_base_score = edge_base_score
+        else:
+            score_edge_index = score_edge_index.to(h.device)
+            if score_edge_attr is not None:
+                score_edge_attr = score_edge_attr.to(h.device)
+
+        if edge_base_score is None:
+            base_logits = h.new_zeros(edge_index.size(1))
+        else:
+            base_logits = self.abc_logit_scale * self.score_to_logit(edge_base_score.to(h.device))
+
+        edge_delta_logits = h.new_zeros(edge_index.size(1))
+        edge_logits = base_logits
+        for layer in self.message_layers:
+            edge_weight = torch.sigmoid(edge_logits)
+            h = layer(h, edge_index, edge_weight)
+            edge_delta_logits = self.edge_head(h, edge_index, edge_attr=edge_attr)
+            edge_logits = base_logits + self.delta_logit_scale * edge_delta_logits
+
+        score_delta_logits = self.edge_head(h, score_edge_index, edge_attr=score_edge_attr)
+        if score_edge_base_score is None:
+            score_logits = self.delta_logit_scale * score_delta_logits
+        else:
+            score_base_logits = self.abc_logit_scale * self.score_to_logit(score_edge_base_score.to(h.device))
+            score_logits = score_base_logits + self.delta_logit_scale * score_delta_logits
+
+        if return_output:
+            return EdgeRerankOutput(
+                node_emb=h,
+                edge_logits=score_logits,
+                edge_delta_logits=score_delta_logits,
+            )
+        return score_logits
 
 
 class PeakLevelIDGLPyG(nn.Module):
@@ -181,4 +295,3 @@ class PeakLevelIDGLPyG(nn.Module):
         if edge_attr is not None:
             edge_attr = edge_attr.to(node_emb.device)
         return self.edge_head(node_emb, edge_index.to(node_emb.device), edge_attr=edge_attr)
-

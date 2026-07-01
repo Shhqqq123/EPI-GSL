@@ -91,6 +91,166 @@ outputs\epi_gsl_edge_rerank_chr5\edge_scores.tsv
 It contains each candidate edge with `abc_score`, `edge_delta_logit`, `edge_logit`,
 and `final_score`.
 
+Sparse iterative graph structure learning mode:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File EPI-GSL\run_edge_seed_splits.ps1 `
+  -ModelMode sparse-gsl `
+  -Seeds "1,2,3,4,5" `
+  -SampleSize 10000 `
+  -GraphIters 2 `
+  -DeltaLogitScale 0.1 `
+  -DeltaL2Weight 0.001 `
+  -OutputRoot outputs\sparse_gsl_seed_splits_chr5
+```
+
+Sparse GSL with ABC hard-negative top-rank training:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File EPI-GSL\run_edge_seed_splits.ps1 `
+  -ModelMode sparse-gsl `
+  -Seeds "1,2,3,4,5" `
+  -SampleSize 10000 `
+  -GraphIters 2 `
+  -DeltaLogitScale 0.075 `
+  -DeltaL2Weight 0.003 `
+  -RankingLossWeight 0.1 `
+  -HardNegativeRatio 2 `
+  -HardRankLossWeight 0.2 `
+  -HardRankMargin 0.5 `
+  -HardRankNegativesPerPositive 4 `
+  -HardRankTopNegativeRatio 20 `
+  -OutputRoot outputs\sparse_gsl_hardrank_g2_scale0p075_l2p003
+```
+
+Sparse GSL with ABC rank consistency:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File EPI-GSL\run_loco_multi_chrom.ps1 `
+  -TestChroms "chr1,chr5,chr10,chr15,chr20" `
+  -ModelMode sparse-gsl `
+  -SampleSize 10000 `
+  -GraphIters 2 `
+  -DeltaLogitScale 0.075 `
+  -DeltaL2Weight 0.003 `
+  -RankingLossWeight 0.1 `
+  -HardNegativeRatio 2 `
+  -HardRankLossWeight 0.1 `
+  -AbcRankLossWeight 0.05 `
+  -AbcRankMargin 0.02 `
+  -AbcRankMinScoreGap 0.0001 `
+  -AbcRankScope negatives `
+  -OutputRoot outputs\loco_multi_sparse_gsl_hardrank_abcrank
+```
+
+Sparse GSL with validation early stopping:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File EPI-GSL\run_loco_multi_chrom.ps1 `
+  -TestChroms "chr1,chr5,chr10,chr15,chr20" `
+  -ModelMode sparse-gsl `
+  -SampleSize 10000 `
+  -GraphIters 2 `
+  -DeltaLogitScale 0.075 `
+  -DeltaL2Weight 0.003 `
+  -RankingLossWeight 0.1 `
+  -HardNegativeRatio 2 `
+  -HardRankLossWeight 0.1 `
+  -AbcRankLossWeight 0.02 `
+  -AbcRankMargin 0.02 `
+  -AbcRankMinScoreGap 0.0001 `
+  -AbcRankScope negatives `
+  -ValidationFraction 0.1 `
+  -ValidationMetric auprc `
+  -EarlyStoppingPatience 30 `
+  -EarlyStoppingMinEpochs 80 `
+  -ScoreBlendAlphas "0,0.05,0.1,0.2,0.3,0.5,0.7,1" `
+  -ScoreBlendMethod rank `
+  -ScoreBlendMetric auprc `
+  -OutputRoot outputs\loco_multi_sparse_gsl_hardrank_abcrank_blend
+```
+
+When `ScoreBlendAlphas` is provided, training selects the alpha with the best validation
+AUPRC and prediction writes `blended_score`; evaluation uses `blended_score` automatically
+when it is available.
+
+For chromosome-level validation instead of random edge validation, add
+`-AutoValidationChrom`. Each held-out run uses the next available chromosome after the
+test chromosome for validation and excludes those validation-chromosome edges from the
+training loss. Use `-AutoValidationChromStrategy previous` or
+`-AutoValidationChromCount 2` for alternative validation splits.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File EPI-GSL\run_loco_multi_chrom.ps1 `
+  -TestChroms "chr1,chr5,chr10,chr15,chr20" `
+  -ModelMode sparse-gsl `
+  -SampleSize 10000 `
+  -GraphIters 2 `
+  -DeltaLogitScale 0.075 `
+  -DeltaL2Weight 0.003 `
+  -RankingLossWeight 0.1 `
+  -HardNegativeRatio 2 `
+  -HardRankLossWeight 0.1 `
+  -AbcRankLossWeight 0.02 `
+  -AbcRankMargin 0.02 `
+  -AbcRankMinScoreGap 0.0001 `
+  -AbcRankScope negatives `
+  -AutoValidationChrom `
+  -AutoValidationChromStrategy next `
+  -AutoValidationChromCount 1 `
+  -ValidationMetric auprc `
+  -EarlyStoppingPatience 30 `
+  -EarlyStoppingMinEpochs 80 `
+  -ScoreBlendAlphas "0,0.05,0.1,0.2,0.3,0.5,0.7,1" `
+  -ScoreBlendMethod rank `
+  -ScoreBlendMetric auprc `
+  -OutputRoot outputs\loco_multi_sparse_gsl_hardrank_abcrank_chromval_blend
+```
+
+For chromosome-batch training, add `-ChromBatchTraining` and set `-SampleSize 0`.
+This trains one chromosome graph at a time, keeping each chromosome's ABC candidate
+graph intact instead of random-sampling nodes across chromosomes:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File EPI-GSL\run_loco_multi_chrom.ps1 `
+  -TestChroms "chr1,chr5,chr10,chr15,chr20" `
+  -ModelMode sparse-gsl `
+  -ChromBatchTraining `
+  -SampleSize 0 `
+  -GraphIters 2 `
+  -DeltaLogitScale 0.075 `
+  -DeltaL2Weight 0.003 `
+  -RankingLossWeight 0.1 `
+  -HardNegativeRatio 2 `
+  -HardRankLossWeight 0.1 `
+  -AbcRankLossWeight 0.02 `
+  -AbcRankMargin 0.02 `
+  -AbcRankMinScoreGap 0.0001 `
+  -AbcRankScope negatives `
+  -AutoValidationChrom `
+  -AutoValidationChromStrategy next `
+  -AutoValidationChromCount 1 `
+  -ValidationMetric auprc `
+  -EarlyStoppingPatience 30 `
+  -EarlyStoppingMinEpochs 80 `
+  -ScoreBlendAlphas "0,0.05,0.1,0.2,0.3,0.5,0.7,1" `
+  -ScoreBlendMethod rank `
+  -ScoreBlendMetric auprc `
+  -OutputRoot outputs\loco_multi_sparse_gsl_chrombatch_fullgraph
+```
+
+LOCO with sparse iterative graph learning:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File EPI-GSL\run_loco_chrom_split.ps1 `
+  -ModelMode sparse-gsl `
+  -SampleSize 10000 `
+  -GraphIters 2 `
+  -DeltaLogitScale 0.1 `
+  -DeltaL2Weight 0.001 `
+  -OutputRoot outputs\loco_chr5_sparse_gsl_scale0p1_l2p001_sample10k
+```
+
 Run a conservative residual parameter grid:
 
 ```powershell
